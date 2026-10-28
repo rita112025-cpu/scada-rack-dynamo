@@ -1,0 +1,363 @@
+{
+  "Uuid": "2432b222-e448-4480-8f9a-4788418d3c98",
+  "IsCustomNode": false,
+  "Description": "SoW V6 附錄 D 機櫃，含共用參數，逐站匯出 NWC",
+  "Name": "SCADA_Racks_SoW_V6",
+  "ElementResolver": {
+    "ResolutionMap": {}
+  },
+  "Inputs": [],
+  "Outputs": [],
+  "Nodes": [
+    {
+      "ConcreteType": "CoreNodeModels.Input.StringInput, CoreNodeModels",
+      "NodeType": "StringInputNode",
+      "InputValue": "D:\\SCADA_主題導覽\\01_BIM model\\SCADA_機櫃_Dynamo\\SCADA_Racks_SoW_V6.csv",
+      "Id": "c8831eec88fe487a929a442063227c7a",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "643422e77aee441cb93a9d120d141839",
+          "Name": "",
+          "Description": "String",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Creates a string."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.StringInput, CoreNodeModels",
+      "NodeType": "StringInputNode",
+      "InputValue": "D:\\SCADA_主題導覽\\01_BIM model\\SCADA_機櫃_Dynamo\\NWC",
+      "Id": "9cc920f272d9406babee99e626a0cae2",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "acfbf11ea0eb4a5bad27c66fe7c2945d",
+          "Name": "",
+          "Description": "String",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Creates a string."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.BoolSelector, CoreNodeModels",
+      "NodeType": "BooleanInputNode",
+      "InputValue": true,
+      "Id": "efb8aef1d7c146ec88e09657cf600a52",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "4c85e605901b4b75914d19835918884d",
+          "Name": "",
+          "Description": "Boolean",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Enables selection between True and False"
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.StringInput, CoreNodeModels",
+      "NodeType": "StringInputNode",
+      "InputValue": "D:\\SCADA_主題導覽\\01_BIM model\\SCADA_機櫃_Dynamo\\RVT",
+      "Id": "e3f57a8b45f8401fa45fd38f5c7a418b",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "7d1463e827384128b9c7c34a9d47eb9c",
+          "Name": "",
+          "Description": "String",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Creates a string."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Input.BoolSelector, CoreNodeModels",
+      "NodeType": "BooleanInputNode",
+      "InputValue": true,
+      "Id": "88733060f147498e8d98604c5b46f6ac",
+      "Inputs": [],
+      "Outputs": [
+        {
+          "Id": "28236238a8414f46ab3b8353ea0ccd9e",
+          "Name": "",
+          "Description": "Boolean",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Enables selection between True and False"
+    },
+    {
+      "ConcreteType": "PythonNodeModels.PythonNode, PythonNodeModels",
+      "Code": "# Dynamo for Revit 2025 (Dynamo 3.3, CPython3) Python Script node.\n# Creates SCADA racks (SoW V6 Appendix D) as Electrical Equipment family\n# instances (one box family per rack size, one type per rack type, saved to\n# 族群\\) carrying shared parameters, one new Revit document per file group.\n# Racks are placed in the\n# matching rooms of each station's architecture model (same shared coordinates),\n# then fine-tuned by the CSV offset / rotation columns, and exported to NWC\n# (shared coordinates) and/or saved as RVT.\n#\n# IN[0]  CSV path (SCADA_Racks_SoW_V6.csv)\n# IN[1]  output folder for NWC files and the shared parameter file\n# IN[2]  True = export NWC files\n# IN[3]  output folder for per-station RVT files\n# IN[4]  True = save one RVT per file group\n# OUT    list of report lines\n\nimport clr\nimport csv\nimport json\nimport math\nimport os\nimport re\n\nclr.AddReference(\"RevitAPI\")\nclr.AddReference(\"RevitServices\")\nfrom Autodesk.Revit.DB import (\n    BasicFileInfo, BuiltInCategory, BuiltInParameter, Category, CurveArrArray,\n    CurveArray, DetachFromCentralOption, DirectShape, ElementId,\n    ElementTransformUtils, ExternalDefinitionCreationOptions,\n    FilteredElementCollector, GroupTypeId, Level, Line, ModelPathUtils,\n    NavisworksCoordinates, NavisworksExportOptions, NavisworksExportScope,\n    NavisworksParameters, OpenOptions, OptionalFunctionalityUtils, Plane,\n    ProjectPosition, SaveAsOptions, SketchPlane, SpecTypeId, Transaction,\n    UnitSystem, View3D, ViewFamily, ViewFamilyType, XYZ,\n)\nfrom Autodesk.Revit.DB.Structure import StructuralType\nfrom RevitServices.Persistence import DocumentManager\nfrom RevitServices.Transactions import TransactionManager\nfrom System.Collections.Generic import List\n\ndoc = DocumentManager.Instance.CurrentDBDocument\napp = doc.Application\n\nAPP_ID = \"SCADA_SoW_V6_Rack\"  # DirectShape racks from earlier versions, cleaned up on run\nRACK_CATEGORY = BuiltInCategory.OST_ElectricalEquipment\nFAMILY_DIR = \"族群\"\nPARAM_GROUP = \"SCADA_SoW_V6\"\nPARAM_PREFIX = \"SCADA_\"\nGROUP_COLUMN = \"檔案群組\"\nCODE_COLUMN = \"編號\"\nMODEL_COLUMN = \"建築模型\"\nROOM_COLUMN = \"房間關鍵字\"\nOFFSET_X_COLUMN = \"X偏移mm\"\nOFFSET_Y_COLUMN = \"Y偏移mm\"\nROTATION_COLUMN = \"旋轉度\"\nCONTROL_COLUMNS = (GROUP_COLUMN, MODEL_COLUMN, ROOM_COLUMN, OFFSET_X_COLUMN, OFFSET_Y_COLUMN, ROTATION_COLUMN)\nPLACEMENT_PARAM = PARAM_PREFIX + \"定位來源\"\nROOM_CACHE_FILE = \"建築模型房間快取.json\"\nVIEW_NAME = \"SCADA_機櫃_3D\"\nMM = 1.0 / 304.8\nRACK_GAP_MM = 1000.0\nROOM_RACK_GAP_MM = 200.0\n\n\ndef read_rows(path):\n    with open(path, encoding=\"utf-8-sig\", newline=\"\") as f:\n        return list(csv.DictReader(f))\n\n\ndef num(value):\n    try:\n        return float(value)\n    except (TypeError, ValueError):\n        return 0.0\n\n\ndef bound_param_names(d):\n    names = set()\n    it = d.ParameterBindings.ForwardIterator()\n    while it.MoveNext():\n        names.add(it.Key.Name)\n    return names\n\n\ndef ensure_shared_params(d, names, bic, out_dir):\n    missing = [n for n in names if n not in bound_param_names(d)]\n    if not missing:\n        return []\n    original = app.SharedParametersFilename\n    sp_path = os.path.join(out_dir, \"SCADA_SoW_V6_SharedParameters.txt\")\n    if not os.path.exists(sp_path):\n        open(sp_path, \"w\").close()\n    try:\n        app.SharedParametersFilename = sp_path\n        def_file = app.OpenSharedParameterFile()\n        group = def_file.Groups.get_Item(PARAM_GROUP) or def_file.Groups.Create(PARAM_GROUP)\n        cats = app.Create.NewCategorySet()\n        cats.Insert(Category.GetCategory(d, bic))\n        binding = app.Create.NewInstanceBinding(cats)\n        for name in missing:\n            definition = group.Definitions.get_Item(name)\n            if definition is None:\n                definition = group.Definitions.Create(\n                    ExternalDefinitionCreationOptions(name, SpecTypeId.String.Text))\n            if not d.ParameterBindings.Insert(definition, binding, GroupTypeId.Data):\n                raise Exception(\"無法綁定共用參數 \" + name)\n    finally:\n        # Restore whatever was set before, including \"none\".\n        try:\n            app.SharedParametersFilename = original or \"\"\n        except Exception:\n            pass\n    return missing\n\n\ndef delete_previous_racks(d):\n    old = [e.Id for e in FilteredElementCollector(d).OfClass(DirectShape)\n           if e.ApplicationId == APP_ID]\n    if old:\n        d.Delete(List[ElementId](old))\n    return len(old)\n\n\ndef get_3d_view(d):\n    for v in FilteredElementCollector(d).OfClass(View3D):\n        if not v.IsTemplate and v.Name == VIEW_NAME:\n            return v\n    vft = next(t for t in FilteredElementCollector(d).OfClass(ViewFamilyType)\n               if t.ViewFamily == ViewFamily.ThreeDimensional)\n    view = View3D.CreateIsometric(d, vft.Id)\n    view.Name = VIEW_NAME\n    return view\n\n\ndef run_transaction(d, name, action):\n    t = Transaction(d, name)\n    t.Start()\n    try:\n        result = action()\n        t.Commit()\n        return result\n    except Exception:\n        t.RollBack()\n        raise\n\n\n# ---------- architecture model rooms ----------\n\ndef open_model(path):\n    opts = OpenOptions()\n    if BasicFileInfo.Extract(path).IsWorkshared:\n        opts.DetachFromCentralOption = DetachFromCentralOption.DetachAndPreserveWorksets\n    return app.OpenDocumentFile(ModelPathUtils.ConvertUserVisiblePathToModelPath(path), opts)\n\n\ndef read_model_rooms(path):\n    d = open_model(path)\n    try:\n        pos = d.ActiveProjectLocation.GetProjectPosition(XYZ.Zero)\n        rooms = []\n        for r in FilteredElementCollector(d).OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType():\n            if r.Location is None or r.Area <= 0:\n                continue\n            p = r.Location.Point\n            rooms.append({\n                \"name\": r.get_Parameter(BuiltInParameter.ROOM_NAME).AsString() or \"\",\n                \"number\": r.get_Parameter(BuiltInParameter.ROOM_NUMBER).AsString() or \"\",\n                \"x\": p.X, \"y\": p.Y, \"z\": p.Z,\n            })\n        return {\"position\": [pos.EastWest, pos.NorthSouth, pos.Elevation, pos.Angle], \"rooms\": rooms}\n    finally:\n        d.Close(False)\n\n\nclass RoomCache:\n    \"\"\"Room data per architecture model, reused until the model file changes.\"\"\"\n\n    def __init__(self, path):\n        self.path = path\n        self.data = {}\n        if os.path.exists(path):\n            with open(path, encoding=\"utf-8\") as f:\n                self.data = json.load(f)\n\n    def get(self, model_path):\n        mtime = os.path.getmtime(model_path)\n        entry = self.data.get(model_path)\n        if entry and entry.get(\"mtime\") == mtime:\n            return entry, False\n        entry = read_model_rooms(model_path)\n        entry[\"mtime\"] = mtime\n        self.data[model_path] = entry\n        with open(self.path, \"w\", encoding=\"utf-8\") as f:\n            json.dump(self.data, f, ensure_ascii=False, indent=1)\n        return entry, True\n\n\ndef find_room(rooms, keyword):\n    \"\"\"First room matching the earliest keyword in 'a|b|c' (name or number, case-insensitive).\"\"\"\n    for key in (k.strip().lower() for k in (keyword or \"\").split(\"|\")):\n        if not key:\n            continue\n        for room in rooms:\n            if key in (room[\"name\"] + \" \" + room[\"number\"]).lower():\n                return room\n    return None\n\n\ndef plan_group(group_rows, base_dir, cache):\n    \"\"\"Return (project position or None, [(row, centre, angle, source)], notes).\"\"\"\n    model = (group_rows[0].get(MODEL_COLUMN) or \"\").strip()\n    entry, notes, model_name = None, [], \"\"\n    if model:\n        model_path = os.path.normpath(os.path.join(base_dir, model))\n        model_name = os.path.basename(model_path)\n        if not os.path.exists(model_path):\n            notes.append(\"找不到建築模型 \" + model)\n        else:\n            try:\n                entry, opened = cache.get(model_path)\n                notes.append((\"已讀取 \" if opened else \"使用快取 \") + model_name)\n            except Exception as ex:\n                notes.append(\"讀取建築模型失敗: \" + str(ex))\n\n    placements, room_counts, origin_x = [], {}, 0.0\n    for r in group_rows:\n        w, dep = num(r[\"寬mm\"]) * MM, num(r[\"深mm\"]) * MM\n        room = find_room(entry[\"rooms\"], r.get(ROOM_COLUMN)) if entry else None\n        if room:\n            key = room[\"name\"] + room[\"number\"]\n            k = room_counts.get(key, 0)\n            room_counts[key] = k + 1\n            centre = XYZ(room[\"x\"] + k * (w + ROOM_RACK_GAP_MM * MM), room[\"y\"], room[\"z\"])\n            source = \"房間 \" + (room[\"number\"] + \" \" + room[\"name\"]).strip() + \"（\" + model_name + \"）\"\n        else:\n            centre = XYZ(origin_x + w / 2, dep / 2, 0)\n            origin_x += w + RACK_GAP_MM * MM\n            if entry:\n                reason = \"找不到房間 \" + (r.get(ROOM_COLUMN) or \"\")\n            elif model:\n                reason = \"建築模型無法使用\"\n            else:\n                reason = \"無建築模型\"\n            source = \"原點（\" + reason + \"）\"\n        # pythonnet does not map XYZ's + operator, so use XYZ.Add.\n        centre = centre.Add(XYZ(num(r.get(OFFSET_X_COLUMN)) * MM, num(r.get(OFFSET_Y_COLUMN)) * MM, 0))\n        placements.append((r, centre, math.radians(num(r.get(ROTATION_COLUMN))), source))\n    position = entry[\"position\"] if entry else None\n    return position, placements, notes\n\n\n# ---------- rack families ----------\n\ndef family_template_path():\n    roots = [app.FamilyTemplatePath or \"\", r\"C:\\ProgramData\\Autodesk\\RVT 2025\\Family Templates\"]\n    for root in roots:\n        if not root:\n            continue\n        base = root if os.path.basename(root) == \"Family Templates\" else os.path.dirname(root)\n        for rel in (r\"Traditional Chinese\\公制電氣設備.rft\", r\"English\\Metric Electrical Equipment.rft\"):\n            path = os.path.join(base, rel)\n            if os.path.exists(path):\n                return path\n    raise Exception(\"找不到電氣設備族群樣板（公制電氣設備.rft）\")\n\n\ndef family_name(row):\n    return \"SCADA_機櫃_\" + \"x\".join(str(int(num(row[c]))) for c in (\"寬mm\", \"深mm\", \"高mm\"))\n\n\ndef build_family(name, w, dep, h, type_names, family_dir):\n    \"\"\"Create a box family (base centre at origin) with one type per rack type, saved as .rfa.\"\"\"\n    fdoc = app.NewFamilyDocument(family_template_path())\n\n    def create():\n        profile = CurveArray()\n        p = [XYZ(-w / 2, -dep / 2, 0), XYZ(w / 2, -dep / 2, 0), XYZ(w / 2, dep / 2, 0), XYZ(-w / 2, dep / 2, 0)]\n        for i in range(4):\n            profile.Append(Line.CreateBound(p[i], p[(i + 1) % 4]))\n        loops = CurveArrArray()\n        loops.Append(profile)\n        plane = SketchPlane.Create(fdoc, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero))\n        fdoc.FamilyCreate.NewExtrusion(True, loops, plane, h)\n        existing = {t.Name for t in fdoc.FamilyManager.Types}\n        for t in type_names:\n            if t not in existing:\n                fdoc.FamilyManager.NewType(t)\n\n    try:\n        run_transaction(fdoc, \"SCADA rack family\", create)\n        opts = SaveAsOptions()\n        opts.OverwriteExistingFile = True\n        opts.MaximumBackups = 1\n        fdoc.SaveAs(os.path.join(family_dir, name + \".rfa\"), opts)\n        remove_backups(family_dir, name, \".rfa\")\n    except Exception:\n        fdoc.Close(False)\n        raise\n    return fdoc\n\n\ndef build_families(rows, family_dir):\n    \"\"\"Return {family name: open family document}; caller closes them.\"\"\"\n    sizes = {}\n    for r in rows:\n        sizes.setdefault(family_name(r), (r, set()))[1].add(r[\"機櫃類型\"])\n    families = {}\n    try:\n        for name, (r, types) in sizes.items():\n            families[name] = build_family(name, num(r[\"寬mm\"]) * MM, num(r[\"深mm\"]) * MM,\n                                          num(r[\"高mm\"]) * MM, sorted(types), family_dir)\n    except Exception:\n        for fdoc in families.values():\n            fdoc.Close(False)\n        raise\n    return families\n\n\ndef load_symbols(d, families):\n    \"\"\"Load every rack family into d (outside a transaction); return {(family, type): FamilySymbol}.\"\"\"\n    symbols = {}\n    for name, fdoc in families.items():\n        fam = fdoc.LoadFamily(d)\n        for sid in fam.GetFamilySymbolIds():\n            s = d.GetElement(sid)\n            symbols[(name, s.Name)] = s\n    return symbols\n\n\ndef activate_symbols(symbols):\n    for s in symbols.values():\n        if not s.IsActive:\n            s.Activate()\n\n\n# ---------- rack placement and output ----------\n\ndef create_rack(d, row, centre, angle, source, symbols, level, data_columns):\n    symbol = symbols[(family_name(row), row[\"機櫃類型\"])]\n    inst = d.Create.NewFamilyInstance(XYZ(centre.X, centre.Y, 0), symbol, level, StructuralType.NonStructural)\n    d.Regenerate()\n    # Level-based placement ignores Z; move the rack to the room floor elevation.\n    dz = centre.Z - inst.Location.Point.Z\n    if abs(dz) > 1e-9:\n        ElementTransformUtils.MoveElement(d, inst.Id, XYZ(0, 0, dz))\n    if abs(angle) > 1e-9:\n        axis = Line.CreateBound(XYZ(centre.X, centre.Y, centre.Z), XYZ(centre.X, centre.Y, centre.Z + 1))\n        ElementTransformUtils.RotateElement(d, inst.Id, axis, angle)\n    values = {PARAM_PREFIX + c: row[c] or \"\" for c in data_columns}\n    values[PLACEMENT_PARAM] = source\n    builtin_values = {\n        BuiltInParameter.ALL_MODEL_MARK: row[CODE_COLUMN],\n        BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS: row[\"站點\"] + \" \" + row[\"房間\"] + \" \" + row[\"機櫃類型\"],\n    }\n    for bip, value in builtin_values.items():\n        p = inst.get_Parameter(bip)\n        if p is not None and not p.IsReadOnly:\n            p.Set(value)\n    for name, value in values.items():\n        p = inst.LookupParameter(name)\n        if p is None or p.IsReadOnly or not p.Set(value):\n            raise Exception(row[CODE_COLUMN] + \" 無法寫入參數 \" + name)\n    return inst.Id\n\n\ndef lowest_level(d):\n    return min(FilteredElementCollector(d).OfClass(Level), key=lambda lv: lv.Elevation)\n\n\ndef export_nwc(d, out_dir, name, ids, view):\n    opts = NavisworksExportOptions()\n    opts.ExportScope = NavisworksExportScope.SelectedElements\n    opts.SetSelectedElementIds(List[ElementId](ids))\n    opts.ViewId = view.Id\n    opts.Coordinates = NavisworksCoordinates.Shared\n    opts.ConvertElementProperties = True\n    opts.Parameters = NavisworksParameters.All\n    opts.ExportElementIds = True\n    opts.ExportLinks = False\n    opts.ExportRoomGeometry = False\n    opts.ExportUrls = False\n    d.Export(out_dir, name, opts)\n\n\ndef remove_backups(rvt_dir, name, ext=\".rvt\"):\n    # Revit keeps at least one backup (name.0001.rvt) when overwriting; drop it.\n    pattern = re.compile(re.escape(name) + r\"\\.\\d{4}\" + re.escape(ext) + \"$\", re.IGNORECASE)\n    for f in os.listdir(rvt_dir):\n        if pattern.match(f):\n            try:\n                os.remove(os.path.join(rvt_dir, f))\n            except OSError:\n                pass  # a locked backup is harmless; the RVT itself is already saved\n\n\ndef new_project_document():\n    template = app.DefaultProjectTemplate\n    if template and os.path.exists(template):\n        return app.NewProjectDocument(template)\n    return app.NewProjectDocument(UnitSystem.Metric)\n\n\ndef build_group(name, position, placements, families, data_columns, param_names, out_dir, do_export, rvt_dir, do_rvt):\n    results = []\n    new_doc = new_project_document()\n    try:\n        bic = RACK_CATEGORY\n        if position:\n            ew, ns, elev, angle = position\n            run_transaction(new_doc, \"SCADA shared coordinates\", lambda: new_doc.ActiveProjectLocation.SetProjectPosition(\n                XYZ.Zero, ProjectPosition(ew, ns, elev, angle)))\n        # Bind parameters in their own transaction so the new racks pick them up.\n        run_transaction(new_doc, \"SCADA parameters\",\n                        lambda: ensure_shared_params(new_doc, param_names, bic, out_dir))\n        symbols = load_symbols(new_doc, families)\n        level = lowest_level(new_doc)\n\n        def place():\n            activate_symbols(symbols)\n            ids = [create_rack(new_doc, r, c, a, s, symbols, level, data_columns) for r, c, a, s in placements]\n            return ids, get_3d_view(new_doc)\n\n        ids, view = run_transaction(new_doc, \"SCADA racks \" + name, place)\n        if do_export:\n            try:\n                export_nwc(new_doc, out_dir, name, ids, view)\n                results.append(\"NWC\")\n            except Exception as ex:\n                results.append(\"NWC 失敗: \" + str(ex))\n        if do_rvt:\n            try:\n                opts = SaveAsOptions()\n                opts.OverwriteExistingFile = True\n                opts.MaximumBackups = 1\n                new_doc.SaveAs(os.path.join(rvt_dir, name + \".rvt\"), opts)\n                remove_backups(rvt_dir, name)\n                results.append(\"RVT\")\n            except Exception as ex:\n                results.append(\"RVT 失敗: \" + str(ex))\n    finally:\n        new_doc.Close(False)\n    return results\n\n\ndef main(csv_path, out_dir, do_export, rvt_dir, do_rvt):\n    report = []\n    rows = read_rows(csv_path)\n    if not rows:\n        return [\"CSV 沒有資料: \" + csv_path]\n    base_dir = os.path.dirname(os.path.abspath(csv_path))\n    os.makedirs(out_dir, exist_ok=True)\n    if do_rvt:\n        os.makedirs(rvt_dir, exist_ok=True)\n    data_columns = [c for c in rows[0].keys() if c not in CONTROL_COLUMNS]\n    param_names = [PARAM_PREFIX + c for c in data_columns] + [PLACEMENT_PARAM]\n    groups = {}\n    for r in rows:\n        groups.setdefault(r[GROUP_COLUMN], []).append(r)\n\n    if do_export and not OptionalFunctionalityUtils.IsNavisworksExporterAvailable():\n        report.append(\"找不到 Navisworks Exporter，不匯出 NWC\")\n        do_export = False\n\n    # Racks from earlier versions of this script lived in the current document.\n    TransactionManager.Instance.EnsureInTransaction(doc)\n    removed = delete_previous_racks(doc)\n    TransactionManager.Instance.TransactionTaskDone()\n    TransactionManager.Instance.ForceCloseTransaction()\n    report.append(\"目前專案刪除舊機櫃 \" + str(removed) + \" 台\")\n\n    family_dir = os.path.join(base_dir, FAMILY_DIR)\n    os.makedirs(family_dir, exist_ok=True)\n    families = build_families(rows, family_dir)\n    report.append(\"族群: \" + \"、\".join(sorted(f + \".rfa\" for f in families)))\n    try:\n        report.extend(build_all_groups(groups, families, base_dir, data_columns, param_names,\n                                       out_dir, do_export, rvt_dir, do_rvt))\n    finally:\n        for fdoc in families.values():\n            fdoc.Close(False)\n    return report\n\n\ndef build_all_groups(groups, families, base_dir, data_columns, param_names, out_dir, do_export, rvt_dir, do_rvt):\n    report = []\n    cache = RoomCache(os.path.join(base_dir, ROOM_CACHE_FILE))\n    for group, group_rows in sorted(groups.items()):\n        try:\n            position, placements, notes = plan_group(group_rows, base_dir, cache)\n            results = build_group(group, position, placements, families, data_columns, param_names,\n                                  out_dir, do_export, rvt_dir, do_rvt)\n            in_room = sum(1 for p in placements if not p[3].startswith(\"原點\"))\n            line = group + \": \" + str(len(placements)) + \" 台（房間 \" + str(in_room) + \"）\"\n            if notes:\n                line += \"；\" + \"；\".join(notes)\n            if results:\n                line += \" -> \" + \" -> \".join(results)\n            report.append(line)\n            for r, _, _, source in placements:\n                if source.startswith(\"原點\") and (r.get(MODEL_COLUMN) or \"\").strip():\n                    report.append(\"    \" + r[CODE_COLUMN] + \": \" + source)\n        except Exception as ex:\n            report.append(group + \": 失敗: \" + str(ex))\n    return report\n\n\ntry:\n    OUT = main(IN[0], IN[1], bool(IN[2]), IN[3], bool(IN[4]))\nexcept Exception as ex:\n    TransactionManager.Instance.ForceCloseTransaction()\n    OUT = [\"執行失敗: \" + str(ex)]\n",
+      "Engine": "CPython3",
+      "EngineName": "CPython3",
+      "VariableInputPorts": true,
+      "Id": "b9eb247be34f44c4877d4592d5d40b6b",
+      "NodeType": "PythonScriptNode",
+      "Inputs": [
+        {
+          "Id": "95d68e7d31be475c9794463fcfa73c39",
+          "Name": "IN[0]",
+          "Description": "Input #0",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "8fd64fe094f74ba78f0b18bf40c2ec31",
+          "Name": "IN[1]",
+          "Description": "Input #1",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "42d17854fb3c4ed5911e0b0877785a9f",
+          "Name": "IN[2]",
+          "Description": "Input #2",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "b2c3ac75ac3c4072af32893704f575a5",
+          "Name": "IN[3]",
+          "Description": "Input #3",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        },
+        {
+          "Id": "719308fd59ef48d7b299db31fd64243c",
+          "Name": "IN[4]",
+          "Description": "Input #4",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "af93e991a9c8423ea5214ad70618c52b",
+          "Name": "OUT",
+          "Description": "Result of the python script",
+          "UsingDefaultValue": false,
+          "Level": 2,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Runs an embedded Python script."
+    },
+    {
+      "ConcreteType": "CoreNodeModels.Watch, CoreNodeModels",
+      "WatchWidth": 420.0,
+      "WatchHeight": 380.0,
+      "Id": "6e63000e51ba4b34b64b4c6fef64d982",
+      "NodeType": "ExtensionNode",
+      "Inputs": [
+        {
+          "Id": "856d02d9bf544377b0de456bdc408c6e",
+          "Name": "",
+          "Description": "Node to show output from",
+          "UsingDefaultValue": false,
+          "Level": 1,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Outputs": [
+        {
+          "Id": "56df2e0a9a504f198ffe785942aa5346",
+          "Name": "",
+          "Description": "Node output",
+          "UsingDefaultValue": false,
+          "Level": 1,
+          "UseLevels": false,
+          "KeepListStructure": false
+        }
+      ],
+      "Replication": "Disabled",
+      "Description": "Visualizes a node's output"
+    }
+  ],
+  "Connectors": [
+    {
+      "Start": "643422e77aee441cb93a9d120d141839",
+      "End": "95d68e7d31be475c9794463fcfa73c39",
+      "Id": "e32b44fc0261428eb1a7fa0dc531bf2d",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "acfbf11ea0eb4a5bad27c66fe7c2945d",
+      "End": "8fd64fe094f74ba78f0b18bf40c2ec31",
+      "Id": "49d50d1de17145af8788af19e9c9d59c",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "4c85e605901b4b75914d19835918884d",
+      "End": "42d17854fb3c4ed5911e0b0877785a9f",
+      "Id": "b8138e346cfc439cb3d0a781fc9e684e",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "7d1463e827384128b9c7c34a9d47eb9c",
+      "End": "b2c3ac75ac3c4072af32893704f575a5",
+      "Id": "04e4141d6ec74a0d81f3241d9f4d2c14",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "28236238a8414f46ab3b8353ea0ccd9e",
+      "End": "719308fd59ef48d7b299db31fd64243c",
+      "Id": "9c88a2d4227a4b2c87f7ccf2e95433b6",
+      "IsHidden": "False"
+    },
+    {
+      "Start": "af93e991a9c8423ea5214ad70618c52b",
+      "End": "856d02d9bf544377b0de456bdc408c6e",
+      "Id": "619795ded43f44b38f63d16fe0c8a09a",
+      "IsHidden": "False"
+    }
+  ],
+  "Dependencies": [],
+  "NodeLibraryDependencies": [],
+  "Thumbnail": "",
+  "GraphDocumentationURL": null,
+  "ExtensionWorkspaceData": [],
+  "Author": "",
+  "Linting": {
+    "activeLinter": "None",
+    "activeLinterId": "7b75fb44-43fd-4631-a878-29f4d5d8399a",
+    "warningCount": 0,
+    "errorCount": 0
+  },
+  "Bindings": [],
+  "View": {
+    "Dynamo": {
+      "ScaleFactor": 1.0,
+      "HasRunWithoutCrash": false,
+      "IsVisibleInDynamoLibrary": true,
+      "Version": "3.3.0.6316",
+      "RunType": "Manual",
+      "RunPeriod": "1000"
+    },
+    "Camera": {
+      "Name": "_Background Preview",
+      "EyeX": -17.0,
+      "EyeY": 24.0,
+      "EyeZ": 50.0,
+      "LookX": 12.0,
+      "LookY": -13.0,
+      "LookZ": -58.0,
+      "UpX": 0.0,
+      "UpY": 1.0,
+      "UpZ": 0.0
+    },
+    "ConnectorPins": [],
+    "NodeViews": [
+      {
+        "Id": "c8831eec88fe487a929a442063227c7a",
+        "Name": "CSV 路徑",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 0,
+        "Y": 0
+      },
+      {
+        "Id": "9cc920f272d9406babee99e626a0cae2",
+        "Name": "NWC 輸出資料夾",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 0,
+        "Y": 150
+      },
+      {
+        "Id": "efb8aef1d7c146ec88e09657cf600a52",
+        "Name": "匯出 NWC",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 0,
+        "Y": 300
+      },
+      {
+        "Id": "e3f57a8b45f8401fa45fd38f5c7a418b",
+        "Name": "RVT 輸出資料夾",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 0,
+        "Y": 450
+      },
+      {
+        "Id": "88733060f147498e8d98604c5b46f6ac",
+        "Name": "存每站 RVT",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 0,
+        "Y": 600
+      },
+      {
+        "Id": "b9eb247be34f44c4877d4592d5d40b6b",
+        "Name": "建立 SCADA 機櫃並匯出 NWC / RVT",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 600,
+        "Y": 200
+      },
+      {
+        "Id": "6e63000e51ba4b34b64b4c6fef64d982",
+        "Name": "執行結果",
+        "IsSetAsInput": false,
+        "IsSetAsOutput": false,
+        "Excluded": false,
+        "ShowGeometry": true,
+        "X": 1000,
+        "Y": 0
+      }
+    ],
+    "Annotations": [],
+    "X": 0.0,
+    "Y": 0.0,
+    "Zoom": 1.0
+  }
+}
