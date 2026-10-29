@@ -221,7 +221,11 @@ class ProjectDataTest(ReportCase):
         pending = [r for r in wb["檢查結果"].iter_rows(min_row=4, values_only=True) if r[2] == "備註"]
         self.assertEqual(len(pending), 17)
         self.assertEqual(sorted(os.listdir(self.out)), sorted([rr.XLSX_NAME, rr.HTML_NAME]))
-        self.assertIn("結果：資料錯誤 0、警告 17；報表 已更新 2／失敗 0", self.output)
+        # Missing-model warnings depend on whether ..\建築模型 exists on this machine; everything else must not.
+        issues = v.validate(v.read_rows(os.path.join(TOOL_DIR, v.DEFAULT_CSV)), TOOL_DIR)
+        model_warnings = sum(1 for i in issues if i.level == v.WARNING and i.column == v.MODEL_COLUMN)
+        self.assertEqual(len(issues), 17 + model_warnings)
+        self.assertIn("結果：資料錯誤 0、警告 %d；報表 已更新 2／失敗 0" % (17 + model_warnings), self.output)
         self.assertIn("<b>17</b><span>備註待確認</span>", self.html())
 
 
