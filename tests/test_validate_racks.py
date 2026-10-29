@@ -97,6 +97,12 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(sorted(check([row(編號=" SB10-COMS-RTU-01", 檔案群組="03_P1_SB10 ")])),
                          sorted([(v.ERROR, "編號"), (v.ERROR, "檔案群組")]))
 
+    def test_control_characters_are_errors(self):
+        for bad in ("a\x0bb", "\x00", "x\x1f"):
+            with self.subTest(bad=repr(bad)):
+                self.assertEqual(check([row(備註=bad)]), [(v.ERROR, "備註")])
+        self.assertEqual(check([row(備註="第一行\r\n第二行\t縮排")]), [])
+
     def test_duplicate_code(self):
         issues = v.validate([row(), row()], ".", {})
         self.assertEqual([(i.column, "第 2、3 列" in i.message) for i in issues], [("編號", True)])
@@ -137,6 +143,13 @@ class GroupTest(unittest.TestCase):
                 row(編號="C", 建築模型="a.rvt", 房間關鍵字="電腦|機房")]
         issues = v.validate(rows, d, cache)
         self.assertEqual([(i.level, i.code, i.column) for i in issues], [(v.WARNING, "C", "房間關鍵字")])
+
+    def test_match_room_prefers_earlier_keyword(self):
+        self.assertEqual(v.match_room(ROOMS, "牽引|SCADA")["number"], "F351")
+        self.assertEqual(v.match_room(ROOMS, "SCADA|牽引")["number"], "F201")
+        self.assertEqual(v.match_room(ROOMS, " |f351")["number"], "F351")
+        self.assertIsNone(v.match_room(ROOMS, "電腦"))
+        self.assertIsNone(v.match_room(ROOMS, ""))
 
     def test_room_cache_file_is_read(self):
         with tempfile.TemporaryDirectory() as d:

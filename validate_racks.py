@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 from collections import namedtuple
 
@@ -25,6 +26,9 @@ NOTE_COLUMN = "備註"
 PENDING_MARK = "待確認"
 DEFAULT_CSV = "SCADA_Racks_SoW_V6.csv"
 ROOM_CACHE_FILE = "建築模型房間快取.json"
+
+# Control characters Excel cannot store (tab, CR and LF are allowed).
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 ERROR = "錯誤"
 WARNING = "警告"
@@ -62,10 +66,20 @@ def _finite(text):
     return n if math.isfinite(n) else None
 
 
+def match_room(rooms, keyword):
+    """Same semantics as scada_racks.find_room: first room matching the earliest keyword in 'a|b|c'
+    (name or number, case-insensitive); None when nothing matches."""
+    for key in (k.strip().lower() for k in (keyword or "").split("|")):
+        if not key:
+            continue
+        for room in rooms:
+            if key in (room["name"] + " " + room["number"]).lower():
+                return room
+    return None
+
+
 def keyword_matches(rooms, keyword):
-    """Same semantics as scada_racks.find_room: '|' separated, case-insensitive, name + number."""
-    keys = [k.strip().lower() for k in (keyword or "").split("|") if k.strip()]
-    return any(k in (r["name"] + " " + r["number"]).lower() for k in keys for r in rooms)
+    return match_room(rooms, keyword) is not None
 
 
 def check_structure(row, code):
@@ -79,6 +93,9 @@ def check_structure(row, code):
         raw = row.get(c) or ""
         if raw != raw.strip():
             issues.append(Issue(ERROR, code, c, "前後有空白「%s」，下游不會自動去除" % raw))
+    for c, val in row.items():
+        if c is not None and isinstance(val, str) and CONTROL_CHARS.search(val):
+            issues.append(Issue(ERROR, code, c, "含控制字元 %r，Excel 無法儲存" % CONTROL_CHARS.search(val).group()))
     return issues
 
 

@@ -1,6 +1,6 @@
 # Dynamo for Revit 2025 (Dynamo 3.3, CPython3) Python Script node.
 # Creates SCADA racks (SoW V6 Appendix D) as Electrical Equipment family
-# instances (one box family per rack size, one type per rack type, saved to
+# instances (one equipment-specific family per CSV row, saved to
 # 族群\) carrying shared parameters, one new Revit document per file group.
 # Racks are placed in the
 # matching rooms of each station's architecture model (same shared coordinates),
@@ -20,29 +20,30 @@ import json
 import math
 import os
 import re
+from contextlib import contextmanager
 
 clr.AddReference("RevitAPI")
 clr.AddReference("RevitServices")
 from Autodesk.Revit.DB import (
-    BasicFileInfo, BuiltInCategory, BuiltInParameter, Category, CurveArrArray,
+    BasicFileInfo, BuiltInCategory, BuiltInParameter, CurveArrArray,
     CurveArray, DetachFromCentralOption, DirectShape, ElementId,
     ElementTransformUtils, ExternalDefinitionCreationOptions,
     FilteredElementCollector, GroupTypeId, Level, Line, ModelPathUtils,
     NavisworksCoordinates, NavisworksExportOptions, NavisworksExportScope,
     NavisworksParameters, OpenOptions, OptionalFunctionalityUtils, Plane,
-    ProjectPosition, SaveAsOptions, SketchPlane, SpecTypeId, Transaction,
+    ProjectPosition, SaveAsOptions, SketchPlane, SpecTypeId, Transaction, TransactionStatus,
     UnitSystem, View3D, ViewFamily, ViewFamilyType, XYZ,
 )
 from Autodesk.Revit.DB.Structure import StructuralType
 from RevitServices.Persistence import DocumentManager
 from RevitServices.Transactions import TransactionManager
+from System import String
 from System.Collections.Generic import List
 
 doc = DocumentManager.Instance.CurrentDBDocument
 app = doc.Application
 
 APP_ID = "SCADA_SoW_V6_Rack"  # DirectShape racks from earlier versions, cleaned up on run
-RACK_CATEGORY = BuiltInCategory.OST_ElectricalEquipment
 FAMILY_DIR = "族群"
 PARAM_GROUP = "SCADA_SoW_V6"
 PARAM_PREFIX = "SCADA_"
@@ -74,18 +75,9 @@ def num(value):
         return 0.0
 
 
-def bound_param_names(d):
-    names = set()
-    it = d.ParameterBindings.ForwardIterator()
-    while it.MoveNext():
-        names.add(it.Key.Name)
-    return names
-
-
-def ensure_shared_params(d, names, bic, out_dir):
-    missing = [n for n in names if n not in bound_param_names(d)]
-    if not missing:
-        return []
+@contextmanager
+def shared_parameter_definitions(names, out_dir):
+    """Keep the source file and definitions alive until all family operations finish."""
     original = app.SharedParametersFilename
     sp_path = os.path.join(out_dir, "SCADA_SoW_V6_SharedParameters.txt")
     if not os.path.exists(sp_path):
@@ -93,24 +85,23 @@ def ensure_shared_params(d, names, bic, out_dir):
     try:
         app.SharedParametersFilename = sp_path
         def_file = app.OpenSharedParameterFile()
+        if def_file is None:
+            raise Exception("無法開啟共用參數檔 " + sp_path)
         group = def_file.Groups.get_Item(PARAM_GROUP) or def_file.Groups.Create(PARAM_GROUP)
-        cats = app.Create.NewCategorySet()
-        cats.Insert(Category.GetCategory(d, bic))
-        binding = app.Create.NewInstanceBinding(cats)
-        for name in missing:
+        definitions = {}
+        for name in names:
             definition = group.Definitions.get_Item(name)
             if definition is None:
                 definition = group.Definitions.Create(
                     ExternalDefinitionCreationOptions(name, SpecTypeId.String.Text))
-            if not d.ParameterBindings.Insert(definition, binding, GroupTypeId.Data):
-                raise Exception("無法綁定共用參數 " + name)
+            definitions[name] = definition
+        yield definitions
     finally:
         # Restore whatever was set before, including "none".
         try:
             app.SharedParametersFilename = original or ""
         except Exception:
             pass
-    return missing
 
 
 def delete_previous_racks(d):
@@ -134,14 +125,20 @@ def get_3d_view(d):
 
 def run_transaction(d, name, action):
     t = Transaction(d, name)
-    t.Start()
     try:
+        if t.Start() != TransactionStatus.Started:
+            raise Exception(name + ": 無法開始交易")
         result = action()
-        t.Commit()
+        status = t.Commit()
+        if status != TransactionStatus.Committed:
+            raise Exception(name + ": 交易未提交（" + str(status) + "）")
         return result
     except Exception:
-        t.RollBack()
+        if t.GetStatus() == TransactionStatus.Started:
+            t.RollBack()
         raise
+    finally:
+        t.Dispose()
 
 
 # ---------- architecture model rooms ----------
@@ -265,10 +262,41 @@ def family_template_path():
 
 
 def family_name(row):
-    return "SCADA_機櫃_" + "x".join(str(int(num(row[c]))) for c in ("寬mm", "深mm", "高mm"))
+    code = row[CODE_COLUMN]
+    if not code or code != code.strip() or re.search(r'[\\/:*?"<>|]', code) or code.endswith("."):
+        raise Exception("設備編號不能用作族群檔名: " + repr(code))
+    return "SCADA_機櫃_" + code
 
 
-def build_family(name, w, dep, h, type_names, family_dir):
+def family_defaults(rows, data_columns, equipment_row=None):
+    """Use exact data for equipment deliverables, or common data for reusable templates."""
+    if equipment_row is not None:
+        return rack_values(equipment_row, "獨立設備族群（載入專案後定位）", data_columns)
+    defaults = {}
+    for column in data_columns:
+        values = {r[column] or "" for r in rows}
+        defaults[PARAM_PREFIX + column] = (next(iter(values)) if len(values) == 1
+                                           else "待填（依設備配置）")
+    # Even a type currently used once must not duplicate an equipment identity.
+    for column in (CODE_COLUMN, "期別", "站點", "建物", "房間", "附錄D項次", "附錄F項次"):
+        if column in data_columns:
+            defaults[PARAM_PREFIX + column] = "待填（依設備配置）"
+    defaults[PLACEMENT_PARAM] = "手動放置（位置待確認）"
+    return defaults
+
+
+def add_family_parameters(manager, definitions, family_name):
+    parameters = {}
+    for name, definition in definitions.items():
+        try:
+            parameters[name] = manager.AddParameter(definition, GroupTypeId.Data, True)
+        except Exception as ex:
+            raise Exception("族群 " + family_name + " 加入共用參數失敗: " + name
+                            + "（GUID " + str(definition.GUID) + "）: " + str(ex)) from ex
+    return parameters
+
+
+def build_family(name, w, dep, h, type_rows, family_dir, data_columns, definitions, equipment_row=None):
     """Create a box family (base centre at origin) with one type per rack type, saved as .rfa."""
     fdoc = app.NewFamilyDocument(family_template_path())
 
@@ -281,13 +309,25 @@ def build_family(name, w, dep, h, type_names, family_dir):
         loops.Append(profile)
         plane = SketchPlane.Create(fdoc, Plane.CreateByNormalAndOrigin(XYZ.BasisZ, XYZ.Zero))
         fdoc.FamilyCreate.NewExtrusion(True, loops, plane, h)
-        existing = {t.Name for t in fdoc.FamilyManager.Types}
-        for t in type_names:
-            if t not in existing:
-                fdoc.FamilyManager.NewType(t)
+        manager = fdoc.FamilyManager
+        parameters = add_family_parameters(manager, definitions, name)
+        existing = {t.Name: t for t in manager.Types}
+        for type_name, rows in sorted(type_rows.items()):
+            manager.CurrentType = existing.get(type_name) or manager.NewType(type_name)
+            for param_name, value in family_defaults(rows, data_columns, equipment_row).items():
+                manager.Set(parameters[param_name], value)
+                actual = manager.CurrentType.AsString(parameters[param_name]) or ""
+                if actual != value:
+                    raise Exception(name + " / " + type_name + " 族群預設資料不一致 " + param_name)
+        return parameters
 
     try:
-        run_transaction(fdoc, "SCADA rack family", create)
+        parameters = run_transaction(fdoc, "SCADA rack family", create)
+        if equipment_row is not None:
+            for param_name, value in family_defaults([equipment_row], data_columns, equipment_row).items():
+                actual = fdoc.FamilyManager.CurrentType.AsString(parameters[param_name]) or ""
+                if actual != value:
+                    raise Exception(name + " 族群提交後資料不一致 " + param_name)
         opts = SaveAsOptions()
         opts.OverwriteExistingFile = True
         opts.MaximumBackups = 1
@@ -299,16 +339,23 @@ def build_family(name, w, dep, h, type_names, family_dir):
     return fdoc
 
 
-def build_families(rows, family_dir):
+def build_families(rows, family_dir, data_columns, definitions):
     """Return {family name: open family document}; caller closes them."""
-    sizes = {}
+    equipment = {}
+    names = set()
     for r in rows:
-        sizes.setdefault(family_name(r), (r, set()))[1].add(r["機櫃類型"])
+        name = family_name(r)
+        if name.casefold() in names:
+            raise Exception("設備族群檔名重複: " + name)
+        names.add(name.casefold())
+        equipment[name] = r
     families = {}
     try:
-        for name, (r, types) in sizes.items():
+        for name, r in equipment.items():
+            types = {r["機櫃類型"]: [r]}
             families[name] = build_family(name, num(r["寬mm"]) * MM, num(r["深mm"]) * MM,
-                                          num(r["高mm"]) * MM, sorted(types), family_dir)
+                                          num(r["高mm"]) * MM, types, family_dir, data_columns, definitions,
+                                          equipment_row=r)
     except Exception:
         for fdoc in families.values():
             fdoc.Close(False)
@@ -321,9 +368,18 @@ def load_symbols(d, families):
     symbols = {}
     for name, fdoc in families.items():
         fam = fdoc.LoadFamily(d)
+        if fam is None:
+            raise Exception("無法載入族群 " + name)
         for sid in fam.GetFamilySymbolIds():
             s = d.GetElement(sid)
-            symbols[(name, s.Name)] = s
+            # Avoid the inherited Name getter issue in Python.NET.
+            p = s.get_Parameter(BuiltInParameter.SYMBOL_NAME_PARAM) if s is not None else None
+            type_name = p.AsString() if p is not None else None
+            if not type_name:
+                raise Exception("無法讀取族群類型名稱 " + name)
+            symbols[(name, type_name)] = s
+        if not any(key[0] == name for key in symbols):
+            raise Exception("族群沒有可用類型 " + name)
     return symbols
 
 
@@ -335,8 +391,45 @@ def activate_symbols(symbols):
 
 # ---------- rack placement and output ----------
 
-def create_rack(d, row, centre, angle, source, symbols, level, data_columns):
-    symbol = symbols[(family_name(row), row["機櫃類型"])]
+def rack_values(row, source, data_columns):
+    values = {PARAM_PREFIX + c: row[c] or "" for c in data_columns}
+    values[PLACEMENT_PARAM] = source
+    return values
+
+
+def write_rack_data(inst, row, source, data_columns, definitions):
+    for name, value in rack_values(row, source, data_columns).items():
+        p = inst.get_Parameter(definitions[name].GUID)
+        if p is None or p.IsReadOnly:
+            raise Exception(row[CODE_COLUMN] + " 無法寫入參數 " + name)
+        # Select the text overload explicitly in Dynamo's Python.NET runtime.
+        result = p.Set.Overloads[String](value)
+        actual = p.AsString() or ""
+        if actual != value:
+            inst.Document.Regenerate()
+            p = inst.get_Parameter(definitions[name].GUID)
+            actual = (p.AsString() or "") if p is not None else None
+        if actual != value:
+            raise Exception(row[CODE_COLUMN] + " 參數寫入後不一致 " + name
+                            + "\n預期值: " + repr(value) + "\n讀回值: " + repr(actual)
+                            + "\nSet 回傳值: " + str(result)
+                            + "\nGUID: " + str(definitions[name].GUID))
+
+
+def verify_rack_data(inst, row, source, data_columns, definitions):
+    for name, expected in rack_values(row, source, data_columns).items():
+        p = inst.get_Parameter(definitions[name].GUID) if inst is not None else None
+        actual = (p.AsString() or "") if p is not None else None
+        if actual != expected:
+            raise Exception(row[CODE_COLUMN] + " 輸出前資料驗證失敗 " + name
+                            + "\n預期值: " + repr(expected) + "\n讀回值: " + repr(actual))
+
+
+def create_rack(d, row, centre, angle, source, symbols, level, data_columns, definitions):
+    key = (family_name(row), row["機櫃類型"])
+    if key not in symbols:
+        raise Exception(row[CODE_COLUMN] + " 找不到族群類型 " + " / ".join(key))
+    symbol = symbols[key]
     inst = d.Create.NewFamilyInstance(XYZ(centre.X, centre.Y, 0), symbol, level, StructuralType.NonStructural)
     d.Regenerate()
     # Level-based placement ignores Z; move the rack to the room floor elevation.
@@ -346,8 +439,6 @@ def create_rack(d, row, centre, angle, source, symbols, level, data_columns):
     if abs(angle) > 1e-9:
         axis = Line.CreateBound(XYZ(centre.X, centre.Y, centre.Z), XYZ(centre.X, centre.Y, centre.Z + 1))
         ElementTransformUtils.RotateElement(d, inst.Id, axis, angle)
-    values = {PARAM_PREFIX + c: row[c] or "" for c in data_columns}
-    values[PLACEMENT_PARAM] = source
     builtin_values = {
         BuiltInParameter.ALL_MODEL_MARK: row[CODE_COLUMN],
         BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS: row["站點"] + " " + row["房間"] + " " + row["機櫃類型"],
@@ -355,11 +446,8 @@ def create_rack(d, row, centre, angle, source, symbols, level, data_columns):
     for bip, value in builtin_values.items():
         p = inst.get_Parameter(bip)
         if p is not None and not p.IsReadOnly:
-            p.Set(value)
-    for name, value in values.items():
-        p = inst.LookupParameter(name)
-        if p is None or p.IsReadOnly or not p.Set(value):
-            raise Exception(row[CODE_COLUMN] + " 無法寫入參數 " + name)
+            p.Set.Overloads[String](value)
+    write_rack_data(inst, row, source, data_columns, definitions)
     return inst.Id
 
 
@@ -400,27 +488,28 @@ def new_project_document():
     return app.NewProjectDocument(UnitSystem.Metric)
 
 
-def build_group(name, position, placements, families, data_columns, param_names, out_dir, do_export, rvt_dir, do_rvt):
+def build_group(name, position, placements, families, data_columns, definitions, out_dir, do_export, rvt_dir, do_rvt):
     results = []
     new_doc = new_project_document()
     try:
-        bic = RACK_CATEGORY
         if position:
             ew, ns, elev, angle = position
             run_transaction(new_doc, "SCADA shared coordinates", lambda: new_doc.ActiveProjectLocation.SetProjectPosition(
                 XYZ.Zero, ProjectPosition(ew, ns, elev, angle)))
-        # Bind parameters in their own transaction so the new racks pick them up.
-        run_transaction(new_doc, "SCADA parameters",
-                        lambda: ensure_shared_params(new_doc, param_names, bic, out_dir))
+        # Shared parameters now travel with the RFA, including manual placements.
         symbols = load_symbols(new_doc, families)
         level = lowest_level(new_doc)
 
         def place():
             activate_symbols(symbols)
-            ids = [create_rack(new_doc, r, c, a, s, symbols, level, data_columns) for r, c, a, s in placements]
+            ids = [create_rack(new_doc, r, c, a, s, symbols, level, data_columns, definitions)
+                   for r, c, a, s in placements]
             return ids, get_3d_view(new_doc)
 
         ids, view = run_transaction(new_doc, "SCADA racks " + name, place)
+        for element_id, (row, _, _, source) in zip(ids, placements):
+            verify_rack_data(new_doc.GetElement(element_id), row, source, data_columns, definitions)
+        results.append("資料驗證 " + str(len(ids)) + " 台×" + str(len(definitions)) + " 欄通過")
         if do_export:
             try:
                 export_nwc(new_doc, out_dir, name, ids, view)
@@ -470,24 +559,29 @@ def main(csv_path, out_dir, do_export, rvt_dir, do_rvt):
 
     family_dir = os.path.join(base_dir, FAMILY_DIR)
     os.makedirs(family_dir, exist_ok=True)
-    families = build_families(rows, family_dir)
-    report.append("族群: " + "、".join(sorted(f + ".rfa" for f in families)))
-    try:
-        report.extend(build_all_groups(groups, families, base_dir, data_columns, param_names,
-                                       out_dir, do_export, rvt_dir, do_rvt))
-    finally:
-        for fdoc in families.values():
-            fdoc.Close(False)
+    with shared_parameter_definitions(param_names, out_dir) as definitions:
+        families = build_families(rows, family_dir, data_columns, definitions)
+        try:
+            report.append("設備族群 " + str(len(families)) + " 個（每台 " + str(len(definitions)) + " 欄預設資料已驗證）")
+            report.extend("RFA: " + os.path.join(family_dir, name + ".rfa") for name in sorted(families))
+            if not do_export and not do_rvt:
+                report.append("僅輸出 RFA 完成")
+                return report
+            report.extend(build_all_groups(groups, families, base_dir, data_columns, definitions,
+                                           out_dir, do_export, rvt_dir, do_rvt))
+        finally:
+            for fdoc in families.values():
+                fdoc.Close(False)
     return report
 
 
-def build_all_groups(groups, families, base_dir, data_columns, param_names, out_dir, do_export, rvt_dir, do_rvt):
+def build_all_groups(groups, families, base_dir, data_columns, definitions, out_dir, do_export, rvt_dir, do_rvt):
     report = []
     cache = RoomCache(os.path.join(base_dir, ROOM_CACHE_FILE))
     for group, group_rows in sorted(groups.items()):
         try:
             position, placements, notes = plan_group(group_rows, base_dir, cache)
-            results = build_group(group, position, placements, families, data_columns, param_names,
+            results = build_group(group, position, placements, families, data_columns, definitions,
                                   out_dir, do_export, rvt_dir, do_rvt)
             in_room = sum(1 for p in placements if not p[3].startswith("原點"))
             line = group + ": " + str(len(placements)) + " 台（房間 " + str(in_room) + "）"
